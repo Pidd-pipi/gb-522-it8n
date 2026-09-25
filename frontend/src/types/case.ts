@@ -30,6 +30,35 @@ export interface Difference {
   confidence: number
 }
 
+export type BatchOutcome = 'succeeded' | 'failed'
+
+export interface BatchCaseResult {
+  case_id: number
+  route_id?: number
+  outcome: BatchOutcome
+  case_status: CaseStatus
+  version: number
+  estimated_distance_m?: number
+  uncertainty_m?: number
+  difference_count: number
+  error_code?: string
+  error_message?: string
+}
+
+export interface BatchAnalyzeResponse {
+  batch_id: string
+  total: number
+  succeeded: number
+  failed: number
+  results: BatchCaseResult[]
+}
+
+export interface BatchCaseConflict {
+  case_id: number
+  reason: 'NOT_FOUND' | 'NOT_DRAFT' | 'DUPLICATE_ID'
+  status?: string
+}
+
 export const caseStatusLabel: Record<CaseStatus, string> = {
   draft: '草稿', analyzing: '分析中', pending_review: '待复核', confirmed: '已确认', closed: '已关闭',
 }

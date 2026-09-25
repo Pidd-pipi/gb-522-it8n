@@ -71,6 +71,19 @@ func (h *CaseHandler) Analyze(c *gin.Context) {
 	ok(c, http.StatusOK, item, nil)
 }
 
+func (h *CaseHandler) BatchAnalyze(c *gin.Context) {
+	var request dto.BatchAnalyzeCasesRequest
+	if !bind(c, h.validate, &request) {
+		return
+	}
+	result, err := h.service.BatchAnalyze(request, actor(c))
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	ok(c, http.StatusOK, result, nil)
+}
+
 func (h *CaseHandler) Confirm(c *gin.Context) {
 	id, valid := idParam(c)
 	if !valid {

@@ -32,7 +32,8 @@ docker compose down -v --remove-orphans
 - 轨迹分析：导入离线采样，记录去噪窗口、检测阈值和合并窗口，缩放真实 API 曲线。
 - 事件复核：按线路、类型和复核状态筛选，保留算法原值并单独保存人工修订。
 - 定位案例：执行基线差异比较，按 `draft -> analyzing -> pending_review -> confirmed -> closed` 流转。
-- 不可变审计：记录轨迹导入、基线变更、算法参数、事件修订、案例确认和关闭，携带 request ID 与前后值摘要。
+- 批量重算工作台：在定位案例页勾选多条草稿案例，统一提交距离容差与损耗阈值，逐条重算并保留成功/失败结果与失败原因；已确认、已关闭等非草稿选择在执行前整体拦截并列出冲突项，失败项可一键退回重算。
+- 不可变审计：记录轨迹导入、基线变更、算法参数、事件修订、案例确认和关闭、批量分析批次与逐条失败退回，携带 request ID 与前后值摘要。
 
 ## 技术栈与目录
 
@@ -85,6 +86,7 @@ frontend/src/pages                 五个业务页与登录页
 | `GET` | `/api/v1/events` | 事件筛选 |
 | `PATCH` | `/api/v1/events/:id/review` | 人工复核 |
 | `GET/POST` | `/api/v1/cases` | 案例列表/新建 |
+| `POST` | `/api/v1/cases/batch-analyze` | 批量重算草稿案例（仅 analyst/admin） |
 | `GET` | `/api/v1/cases/:id` | 案例与差异 |
 | `POST` | `/api/v1/cases/:id/analyze` | 基线比对 |
 | `POST` | `/api/v1/cases/:id/confirm` | reviewer 确认 |
@@ -115,7 +117,7 @@ frontend/src/pages                 五个业务页与登录页
 4. 距离公式：`distance = c * sample_index * sample_interval_ns * 1e-9 / (2 * refractive_index)`，其中 `c = 299792458 m/s`。超过线路长度的候选事件被拒绝。
 5. 基线比对：在距离容差内一对一最近匹配，输出新增、消失和损耗增大三类差异与置信度。
 
-状态迁移使用条件更新和 `version` 乐观锁。分析失败回到 `draft` 并保存错误；只有 reviewer/admin 能确认；关闭后不可修改。登录、轨迹导入和分析使用本地内存限流。访问日志不记录 JWT、密码、请求体或完整采样数组。
+状态迁移使用条件更新和 `version` 乐观锁。分析失败回到 `draft` 并保存错误；只有 reviewer/admin 能确认；关闭后不可修改。批量重算仅接受 `draft` 案例：选择中存在非草稿、缺失或重复 ID 时整体拒绝并在 `error.details.conflicts` 中逐条说明，批次不启动；批内单条算法失败只退回该案例并在结果中给出错误码与原因，不影响其他条目。登录、轨迹导入和分析使用本地内存限流。访问日志不记录 JWT、密码、请求体或完整采样数组。
 
 ## 本地开发与验证
 
@@ -139,6 +141,7 @@ npm --prefix frontend run build
 - 轨迹导入被拒绝：确认至少 16 点、无 NaN/Inf，采样范围覆盖线路至少 5%，且不超过 `MAX_TRACE_POINTS`。
 - 案例无法分析：基线和当前轨迹均需先执行事件检测。
 - 确认返回 `STATE_CONFLICT`：刷新案例取得最新 `version`，并确认状态为 `pending_review`。
+- 批量重算返回 `STATE_CONFLICT`：响应 `error.details.conflicts` 列出非草稿（`NOT_DRAFT`，含当前状态）、不存在（`NOT_FOUND`）和重复勾选（`DUPLICATE_ID`）的条目；处理后重新提交，批次未执行前不会改动任何案例。批内失败项状态回到 `draft`，可在页面结果区勾选“退回失败项重算”。
 
 ## License
 

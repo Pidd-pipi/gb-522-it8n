@@ -33,3 +33,25 @@ export interface Difference {
 export const caseStatusLabel: Record<CaseStatus, string> = {
   draft: '草稿', analyzing: '分析中', pending_review: '待复核', confirmed: '已确认', closed: '已关闭',
 }
+
+export const BATCH_OUTCOMES = ['succeeded', 'failed', 'skipped'] as const
+export type BatchOutcome = (typeof BATCH_OUTCOMES)[number]
+
+export interface BatchAnalyzeItemResult {
+  case_id: number
+  outcome: BatchOutcome
+  reason?: string
+  case?: LocalizationCase
+}
+
+export interface BatchAnalyzeResponse {
+  batch_id: string
+  results: BatchAnalyzeItemResult[]
+  succeeded: number
+  failed: number
+  skipped: number
+}
+
+export const batchOutcomeLabel: Record<BatchOutcome, string> = {
+  succeeded: '成功', failed: '失败', skipped: '已跳过',
+}

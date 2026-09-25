@@ -116,16 +116,6 @@ func (s *CaseService) Analyze(id uint, request dto.AnalyzeCaseRequest, actor Act
 	if !constants.CanTransition(item.CaseStatus, constants.CaseAnalyzing) {
 		return item, conflict("case must be in draft before analysis", nil)
 	}
-	if err := s.store.Transaction(func(tx *repository.Store) error {
-		if err := tx.Cases.Transition(item.ID, item.Version, constants.CaseDraft, constants.CaseAnalyzing, map[string]any{"analysis_error": ""}); err != nil {
-			return err
-		}
-		return tx.Audits.Create(audit(actor, "case.analysis_started", "LocalizationCase", item.ID, &item.RouteID, snapshot(map[string]any{"status": item.CaseStatus}), snapshot(map[string]any{"status": constants.CaseAnalyzing})))
-	}); err != nil {
-		return item, conflict("case changed while analysis was starting", err)
-	}
-	item.CaseStatus = constants.CaseAnalyzing
-	item.Version++
 	tolerance, loss := request.DistanceToleranceM, request.LossIncreaseDB
 	var saved dto.CaseParameters
 	_ = json.Unmarshal(item.ParametersJSON, &saved)
@@ -141,13 +131,68 @@ func (s *CaseService) Analyze(id uint, request dto.AnalyzeCaseRequest, actor Act
 	if loss == 0 {
 		loss = 0.5
 	}
+	return s.runAnalysis(item, tolerance, loss, actor, "")
+}
+
+// BatchAnalyze re-runs draft cases one by one under a shared parameter set.
+// Non-draft or missing cases are reported as skipped conflicts instead of
+// aborting the batch; every recompute and failure rollback stays audited
+// with the batch ID so the run can be traced end to end.
+func (s *CaseService) BatchAnalyze(request dto.BatchAnalyzeCasesRequest, actor Actor) (dto.BatchAnalyzeResponse, error) {
+	batchID := fmt.Sprintf("batch-%d", time.Now().UnixNano())
+	response := dto.BatchAnalyzeResponse{BatchID: batchID, Results: make([]dto.BatchAnalyzeItemResult, 0, len(request.CaseIDs))}
+	for _, caseID := range request.CaseIDs {
+		item, err := s.store.Cases.Get(caseID)
+		if errors.Is(err, repository.ErrNotFound) {
+			response.Skipped++
+			response.Results = append(response.Results, dto.BatchAnalyzeItemResult{CaseID: caseID, Outcome: dto.BatchSkipped, Reason: "case does not exist"})
+			continue
+		}
+		if err != nil {
+			return response, internal("load case for batch analysis failed", err)
+		}
+		if item.CaseStatus != constants.CaseDraft {
+			response.Skipped++
+			response.Results = append(response.Results, dto.BatchAnalyzeItemResult{CaseID: caseID, Outcome: dto.BatchSkipped, Reason: fmt.Sprintf("case status is %s; only draft cases can be re-analyzed in a batch", item.CaseStatus), Case: &item})
+			continue
+		}
+		analyzed, err := s.runAnalysis(item, request.DistanceToleranceM, request.LossIncreaseDB, actor, batchID)
+		if err != nil {
+			response.Failed++
+			response.Results = append(response.Results, dto.BatchAnalyzeItemResult{CaseID: caseID, Outcome: dto.BatchFailed, Reason: err.Error()})
+			continue
+		}
+		response.Succeeded++
+		response.Results = append(response.Results, dto.BatchAnalyzeItemResult{CaseID: caseID, Outcome: dto.BatchSucceeded, Case: &analyzed})
+	}
+	return response, nil
+}
+
+// runAnalysis transitions a draft case through analyzing and persists the
+// outcome. batchID is empty for single-case runs and tags audit entries when
+// the run belongs to a batch workbench submission.
+func (s *CaseService) runAnalysis(item model.LocalizationCase, tolerance, loss float64, actor Actor, batchID string) (model.LocalizationCase, error) {
+	tag := func(payload map[string]any) map[string]any {
+		if batchID != "" {
+			payload["batch_id"] = batchID
+		}
+		return payload
+	}
+	if err := s.store.Transaction(func(tx *repository.Store) error {
+		if err := tx.Cases.Transition(item.ID, item.Version, constants.CaseDraft, constants.CaseAnalyzing, map[string]any{"analysis_error": ""}); err != nil {
+			return err
+		}
+		return tx.Audits.Create(audit(actor, "case.analysis_started", "LocalizationCase", item.ID, &item.RouteID, snapshot(map[string]any{"status": item.CaseStatus}), snapshot(tag(map[string]any{"status": constants.CaseAnalyzing}))))
+	}); err != nil {
+		return item, conflict("case changed while analysis was starting", err)
+	}
 	differences, analysisErr := s.compareEvents(item, tolerance, loss)
 	if analysisErr != nil {
 		_ = s.store.Transaction(func(tx *repository.Store) error {
 			if err := tx.Cases.SaveAnalysis(item.ID, constants.CaseDraft, map[string]any{"analysis_error": analysisErr.Error()}); err != nil {
 				return err
 			}
-			return tx.Audits.Create(audit(actor, "case.analysis_failed", "LocalizationCase", item.ID, &item.RouteID, "{}", snapshot(map[string]any{"error": analysisErr.Error()})))
+			return tx.Audits.Create(audit(actor, "case.analysis_failed", "LocalizationCase", item.ID, &item.RouteID, "{}", snapshot(tag(map[string]any{"error": analysisErr.Error()}))))
 		})
 		return item, &AppError{CodeAlgorithmInput, http.StatusUnprocessableEntity, "case analysis could not be completed", analysisErr}
 	}
@@ -159,16 +204,16 @@ func (s *CaseService) Analyze(id uint, request dto.AnalyzeCaseRequest, actor Act
 		updates["estimated_distance_m"] = distance
 		updates["uncertainty_m"] = uncertainty
 	}
-	err = s.store.Transaction(func(tx *repository.Store) error {
+	err := s.store.Transaction(func(tx *repository.Store) error {
 		if err := tx.Cases.SaveAnalysis(item.ID, constants.CasePendingReview, updates); err != nil {
 			return err
 		}
-		return tx.Audits.Create(audit(actor, "case.analysis_completed", "LocalizationCase", item.ID, &item.RouteID, "{}", snapshot(map[string]any{"differences": len(differences), "parameters": json.RawMessage(params)})))
+		return tx.Audits.Create(audit(actor, "case.analysis_completed", "LocalizationCase", item.ID, &item.RouteID, "{}", snapshot(tag(map[string]any{"differences": len(differences), "parameters": json.RawMessage(params)}))))
 	})
 	if err != nil {
 		return item, conflict("case changed while analysis was saved", err)
 	}
-	return s.store.Cases.Get(id)
+	return s.store.Cases.Get(item.ID)
 }
 
 func (s *CaseService) compareEvents(item model.LocalizationCase, tolerance, loss float64) ([]algorithm.Difference, error) {
